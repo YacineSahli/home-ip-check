@@ -1,0 +1,9 @@
+services:
+  home-ip-check:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: home_ip_check
+    restart: unless-stopped
+    volumes:
+      - ./ip_config:/config
