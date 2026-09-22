@@ -1,42 +1,57 @@
 #!/bin/sh
+# home-ip-check — send an ntfy notification when the home public IP changes.
+# Deployed on: pve2 host (Proxmox) as a systemd timer — see README.md.
+# Config : /etc/home-ip-check.env     (NTFY_TOPIC, NTFY_SERVER — root only)
+# State  : /var/lib/home-ip-check/old_ip.txt
 
-# Configuration
-NTFY_TOPIC=""
-NTFY_SERVER="https://ntfy.sh"
+set -u
 
-OLD_IP_FILE="/config/old_ip.txt"
+NTFY_TOPIC="${NTFY_TOPIC:-}"
+NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+OLD_IP_FILE="${OLD_IP_FILE:-/var/lib/home-ip-check/old_ip.txt}"
 
-# Function to send an ntfy notification
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S%z'): $*"; }
+
+[ -z "$NTFY_TOPIC" ] && { log "NTFY_TOPIC is not set — check /etc/home-ip-check.env"; exit 1; }
+
 send_notification() {
-    local message=$1
-    curl -H "Title: Public IP Change Alert" \
-         -H "Priority: high" \
-         -d "$message" \
-         "$NTFY_SERVER/$NTFY_TOPIC"
+    curl --max-time 20 -sf \
+        -H "Title: Public IP Change Alert" \
+        -H "Priority: high" \
+        -d "$1" \
+        "$NTFY_SERVER/$NTFY_TOPIC" >/dev/null
 }
 
-# Get current public IP
-CURRENT_IP=$(curl -s api.ipify.org)
-
-# Check if the IP was retrieved successfully
+CURRENT_IP=$(curl --max-time 20 -sf https://api.ipify.org)
 if [ -z "$CURRENT_IP" ]; then
-    echo "$(date): Failed to retrieve public IP"
+    log "failed to retrieve public IP (ipify unreachable or error)"
     exit 1
 fi
 
-# Check if the old IP file exists
-if [ -f "$OLD_IP_FILE" ]; then
-    OLD_IP=$(cat "$OLD_IP_FILE")
+# Validate IPv4 — guards against captive portals / HTML error pages stored as an "IP"
+if ! printf '%s' "$CURRENT_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    log "invalid response from ipify: $CURRENT_IP"
+    exit 1
+fi
+for octet in $(printf '%s' "$CURRENT_IP" | tr '.' ' '); do
+    [ "$octet" -le 255 ] || { log "invalid IP: $CURRENT_IP"; exit 1; }
+done
 
-    # Compare current and old IP
-    if [ "$CURRENT_IP" != "$OLD_IP" ]; then
-        MESSAGE="Homelab Public IP changed from $OLD_IP to $CURRENT_IP"
-        send_notification "$MESSAGE"
-        echo "$CURRENT_IP" > "$OLD_IP_FILE" # Update the stored IP
+if [ -s "$OLD_IP_FILE" ]; then
+    OLD_IP=$(cat "$OLD_IP_FILE")
+    if [ "$CURRENT_IP" = "$OLD_IP" ]; then
+        log "IP unchanged ($CURRENT_IP)"
+        exit 0
     fi
+    MESSAGE="Homelab Public IP changed from $OLD_IP to $CURRENT_IP"
 else
-    # If file doesn't exist, create it and notify
-    echo "$CURRENT_IP" > "$OLD_IP_FILE"
     MESSAGE="Homelab Public IP initialized to $CURRENT_IP"
-    send_notification "$MESSAGE"
+fi
+
+if send_notification "$MESSAGE"; then
+    echo "$CURRENT_IP" > "$OLD_IP_FILE"  # update state only after a confirmed send
+    log "$MESSAGE"
+else
+    log "ntfy send FAILED — state not updated, will retry next run"
+    exit 1
 fi
