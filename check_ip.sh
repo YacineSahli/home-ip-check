@@ -51,6 +51,8 @@ fi
 if send_notification "$MESSAGE"; then
     echo "$CURRENT_IP" > "$OLD_IP_FILE"  # update state only after a confirmed send
     log "$MESSAGE"
+    # propagate the change to the fleet (crowdsec allow + wordfence allowlist)
+    systemctl start home-ip-sync.service >/dev/null 2>&1 || true
 else
     log "ntfy send FAILED — state not updated, will retry next run"
     exit 1
